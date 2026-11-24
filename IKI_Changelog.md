@@ -220,3 +220,128 @@ provide additional clearance. The full-footprint policy can be conservative in
 narrow inflated spaces. A failed prediction requests a stop; it does not find an
 alternative avoidance trajectory. Passing these checks cannot guarantee that a
 physical robot will not contact a wall.
+
+## 2026-11-24 — Follow-up: original tuning and full-route stall
+
+The first user-run long-route test exposed behavior not covered by the earlier
+short, single-goal Gazebo checks. Those earlier passes do not establish that the
+reported route works.
+
+### Restored user tuning
+
+`config/neo_local_planner.yaml` preserves all 34 supplied settings exactly,
+including `acc_lim_x/y: 0.25`, `acc_lim_theta: 0.8`, X bounds -0.2/0.8,
+Y bounds -0.5/0.5, `max_rot_vel: 0.8`, `max_trans_vel: 0.8`,
+`min_trans_vel: 0.1`, `lookahead_time: 0.4`, `lookahead_dist: 1.0`,
+`low_pass_gain: 0.2`, `max_cost: 0.95`, and `min_stop_dist: 0.2`.
+The historical translation aliases remain supported. The subsection is named
+`NeoLocalPlanner`, matching the existing selector. The fragment does not replace
+the existing `controller_plugins` list or remove MPPI configuration. The example
+controller frequency is 50 Hz, matching the supplied launch log.
+
+Only explicit TF/topic settings and additional safety settings are supplied
+alongside that tuning. The README remains unchanged.
+
+### Corrected premature stuck rejection
+
+The old stuck gate rejected the entire calculation from measured-motion
+lookahead, negative buffered obstacle distance and a positive X cost gradient,
+before checking the proposed command. This can reject a safe lateral escape next
+to a forward obstacle. That gate is removed. Existing forward-distance braking
+remains, and both measured and proposed XY/yaw stopping trajectories still pass
+through the complete footprint collision checker before a command is returned.
+Lethal/unknown-cell and boundary rejection remain enforced. Inflation semantics
+are corrected separately below.
+
+### Corrected duplicate simulation-clock handling
+
+Nav2's wall-rate loop can execute twice before a new `/clock` timestamp arrives.
+Previously each duplicate timestamp raised `NoValidControl` and cleared velocity
+state, preventing acceleration when the control loop outran clock publication.
+The controller now waits for at most `clock_wait_timeout` (default 0.05 seconds)
+for ROS time to advance. Steady time bounds the wait only; control integration
+continues to use the node's ROS clock. The costmap mutex is acquired after this
+wait. A clock that remains frozen, jumps backward, or advances by an excessive
+interval still rejects control and resets state. No stale nonzero command is
+returned as a workaround. `clock_wait_timeout` is finite, nonnegative and no
+greater than `max_control_dt`; setting it to zero disables the wait.
+
+### Follow-up verification
+
+The package build and source style checks passed. `colcon test` completed with
+no package tests, consistent with the earlier requested removal. Four additional
+actual controller-server integration cases passed using the supplied tuning:
+
+- A dense multi-pose path with a 50 Hz control loop and approximately 25 Hz clock
+  reached its goal, reached about 0.53 m/s, and produced no ordinary time-delta
+  failures.
+- An inflated forward obstacle with small measured forward motion allowed a
+  collision-checked lateral command instead of the premature stuck rejection;
+  lateral displacement was about 4.7 cm during the bounded observation.
+- Paused and backward-jumping simulation clocks produced zero commands and
+  recovered after valid clock progress.
+- An invalid numerical path was rejected with `INVALID_PATH` and zero commands.
+
+These checks are stored in `regressions.result.json` and associated traces in the
+same session storage as the earlier integration evidence. Startup TF availability,
+laser QoS compatibility, initial global-map bounds and keepout warnings in the
+supplied log are separate bringup/data issues; these controller changes do not
+claim to fix those components.
+
+
+### Corrected Nav2 inflation semantics and redundant TF lookup
+
+Retracted: the initial implementation treated high/inscribed inflation costs at
+ANY footprint cell as hard occupied geometry. That double-counted the robot's
+inflation margin and could stall collision-free motion in inflated passages.
+The corrected checker rejects lethal and unknown cells throughout the filled
+footprint and rejects map-boundary crossings. Inscribed/configured inflation
+thresholds apply at the robot center. This follows the distinction used by
+[Jazzy Nav2's footprint collision checking](https://github.com/ros-navigation/navigation2/blob/jazzy/nav2_regulated_pure_pursuit_controller/src/collision_checker.cpp).
+The configured `max_cost: 0.95` was not changed.
+
+A regression with inscribed cells under the footprint, a free robot center and
+20 cm physical wall clearance now reaches a lateral goal. Actual lethal/unknown
+footprint intersections and map-boundary crossings continue to reject control.
+
+The separate `base_link <- path_frame` lookup was also redundant: Nav2 already
+supplies the robot pose. A newly started controller can have no overlapping TF
+history for that composite chain even though `odom <- map` and the supplied robot
+pose are valid. Robot-relative reverse-path selection now uses the inverse of
+the validated supplied local robot pose and the transformed local path. Required
+path/local and pose/local TF failures still abort with `ControllerTFError`.
+
+### Full-route Gazebo follow-up
+
+A separate controller server using the current workspace library and original
+supplied tuning completed the 146-pose Navfn path toward map goal
+`(-2.32, -2.13)` in the running Gazebo simulator. It traveled approximately
+3.46 m, returned `NONE`/success, and ended with zero commands. A temporary Nav2
+absolute translational speed restriction limited this test to 0.10 m/s without
+changing the configured tuning. The test used the live TF, odometry, actual
+11-vertex dynamic footprint and a graded mirror of the local costmap. The
+mirror preserved lethal/unknown geometry instead of promoting inflated costs to
+lethal obstacles. Existing simulator/Nav2 configuration was unchanged, and the
+validation controller was shut down afterward.
+
+Initial long-route attempts stopped safely with a redundant-TF-chain error and
+then with insufficient progress under the overconservative inflation policy;
+those attempts were failures, not passes. The successful follow-up followed the
+corrections above. Evidence is in `gazebo_long_route.result.json`, its command and
+odometry traces, and its server log in session storage.
+
+Five focused integration checks using the supplied tuning now pass, including
+the added inflation-semantics regression. The latest results are in
+`regressions_final.result.json`; these supersede the earlier four-case follow-up
+result. Build and style checks passed. Physical robot commissioning and stopping
+distance remain unverified.
+
+Final follow-up validation passed all 26 isolated integration checks (20 safety,
+5 original-tuning regressions and 1 reverse-path check), plus the full Gazebo
+route above. The reverse-path check respected the original -0.20 m/s lower X
+limit with zero lateral commands in differential mode. Latest synthetic wall
+checks retained positive physical clearance (minimum approximately 2 mm); this
+supersedes earlier clearance measurements and is not a hardware stopping-margin
+claim. `colcon build` and the subsequent `colcon test` completed successfully;
+there are no registered package tests after the requested test-file removal.
+README remains unchanged. No commit was created.

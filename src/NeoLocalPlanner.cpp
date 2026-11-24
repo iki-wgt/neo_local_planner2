@@ -34,9 +34,11 @@
 
 #include "NeoLocalPlanner.hpp"
 
+#include <chrono>
 #include <cmath>
 #include <initializer_list>
 #include <limits>
+#include <thread>
 
 #include "nav2_core/controller_exceptions.hpp"
 #include "nav2_costmap_2d/costmap_filters/filter_values.hpp"
@@ -277,7 +279,6 @@ geometry_msgs::msg::TwistStamped NeoLocalPlanner::computeVelocityCommands(
 {
   std::lock_guard<std::mutex> lock_reinit(m_mutex);
   try {
-    std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> costmap_lock(*costmap_->getMutex());
     geometry_msgs::msg::Twist cmd_vel;
     geometry_msgs::msg::TwistStamped cmd_vel_final;
     validatePath(m_global_plan);
@@ -290,25 +291,31 @@ geometry_msgs::msg::TwistStamped NeoLocalPlanner::computeVelocityCommands(
       throw nav2_core::ControllerTFError("Robot pose frame_id is empty");
     }
 
-    const rclcpp::Time time_now = clock_->now();
+    // A WallRate controller may run faster than /clock is published. Wait for
+    // the next ROS timestamp instead of repeatedly resetting valid control state.
+    // Steady time bounds this wait only; integration still uses ROS time.
+    auto time_now = clock_->now();
+    const auto wait_deadline = std::chrono::steady_clock::now() +
+      std::chrono::duration<double>(clock_wait_timeout);
+    while (time_now == m_last_time && std::chrono::steady_clock::now() < wait_deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      time_now = clock_->now();
+    }
     const double dt = (time_now - m_last_time).seconds();
     if (!std::isfinite(dt) || dt <= 0.0 || dt > max_control_dt) {
-      throw nav2_core::NoValidControl("Control time delta must be in (0, max_control_dt]");
+      throw nav2_core::NoValidControl("Control time delta " + std::to_string(dt) +
+              " s must be in (0, max_control_dt]; ROS clock did not advance or jumped");
     }
 
+    std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> costmap_lock(*costmap_->getMutex());
     const auto global_to_local = lookupTransform(m_local_frame, m_global_plan.header.frame_id);
-    const auto global_to_robot = lookupTransform(m_base_frame, m_global_plan.header.frame_id);
     std::vector<tf2::Transform> local_plan;
-    std::vector<tf2::Transform> transformed_plan;
     local_plan.reserve(m_global_plan.poses.size());
-    transformed_plan.reserve(m_global_plan.poses.size());
     for (const auto & pose : m_global_plan.poses) {
       tf2::Transform path_pose;
       tf2::fromMsg(pose.pose, path_pose);
       local_plan.push_back(global_to_local * path_pose);
-      transformed_plan.push_back(global_to_robot * path_pose);
       validateTransform(local_plan.back());
-      validateTransform(transformed_plan.back());
     }
     if (local_plan.empty()) {
       throw nav2_core::InvalidPath("Transformed local path is empty");
@@ -317,17 +324,23 @@ geometry_msgs::msg::TwistStamped NeoLocalPlanner::computeVelocityCommands(
     if (m_robot_direction != 1.0 && m_robot_direction != -1.0) {
       throw nav2_core::NoValidControl("Invalid robot direction state");
     }
-    if (m_allow_reversing && count == 0) {
-      const auto index = std::min<size_t>(5, transformed_plan.size() - 1);
-      m_robot_direction = transformed_plan[index].getOrigin().x() >= 0.0 ? 1.0 : -1.0;
-      count = 1;
-    }
+
 
     // get latest local pose
     tf2::Transform local_pose;
     tf2::fromMsg(position.pose, local_pose);
     local_pose = lookupTransform(m_local_frame, position.header.frame_id) * local_pose;
     validateTransform(local_pose);
+
+    // Nav2 supplies the base pose. Use it for robot-relative path geometry
+    // instead of a redundant base <- global TF lookup at a different common time.
+    if (m_allow_reversing && count == 0) {
+      const auto index = std::min<size_t>(5, local_plan.size() - 1);
+      const auto robot_target = local_pose.inverse() * local_plan[index];
+      validateTransform(robot_target);
+      m_robot_direction = robot_target.getOrigin().x() >= 0.0 ? 1.0 : -1.0;
+      count = 1;
+    }
 
     const double start_yaw = tf2::getYaw(local_pose.getRotation());
     const double start_vel_x = speed.linear.x;
@@ -585,7 +598,7 @@ geometry_msgs::msg::TwistStamped NeoLocalPlanner::computeVelocityCommands(
         }
       }
 
-      // limit velocity when approaching an obstacle
+      // Limit forward motion without rejecting a safe lateral or reverse command.
       if (have_obstacle && fabs(start_vel_x) > 0) {
         const double stop_accel = 0.9 * acc_lim_x;
         const double stop_time = sqrt(2 * finiteMax(obstacle_dist, 0) / stop_accel);
@@ -692,21 +705,9 @@ geometry_msgs::msg::TwistStamped NeoLocalPlanner::computeVelocityCommands(
         control_yawrate -= delta_cost_yaw * cost_yaw_gain;
       }
     }
-    // check if we are stuck
-    if (have_obstacle && obstacle_dist <= 0 && delta_cost_x > 0 &&
-      m_state == state_t::STATE_ROTATING && fabs(yaw_error) < M_PI / 6)
-    {
-      // we are stuck
-      m_state = state_t::STATE_STUCK;
-
-      RCLCPP_WARN_THROTTLE(
-        logger_, *clock_, 2000,
-        "We are stuck: yaw_error=%f, obstacle_dist=%f, obstacle_cost=%f, delta_cost_x=%f",
-        yaw_error, obstacle_dist, obstacle_cost, delta_cost_x);
-
-      throw nav2_core::NoValidControl("Obstacle blocks the path");
-    }
-
+    // Measured-motion lookahead cannot decide that every command is blocked:
+    // a stationary omni robot may have a valid lateral or reverse escape.
+    // The final candidate and measured stopping trajectories remain authoritative.
     requireFinite({control_vel_x, control_vel_y, control_yawrate}, "raw control velocity");
 
     // apply low pass filter
@@ -853,6 +854,7 @@ const std::vector<NeoLocalPlanner::NumericParameter> & NeoLocalPlanner::numericP
     {"min_stop_dist", &NeoLocalPlanner::min_stop_dist, 0.5},
     {"emergency_acc_lim_x", &NeoLocalPlanner::emergency_acc_lim_x, 0.5},
     {"max_control_dt", &NeoLocalPlanner::max_control_dt, 0.5},
+    {"clock_wait_timeout", &NeoLocalPlanner::clock_wait_timeout, 0.05},
   };
   return parameters;
 }
@@ -874,6 +876,9 @@ std::string NeoLocalPlanner::validateParameters(const std::map<std::string, doub
     if (v.at(name) <= 0.0) {
       return std::string(name) + " must be positive";
     }
+  }
+  if (v.at("clock_wait_timeout") > v.at("max_control_dt")) {
+    return "clock_wait_timeout must not exceed max_control_dt";
   }
   if (v.at("min_vel_x") > 0 || v.at("min_vel_y") > 0) {
     return "Signed min_vel_x and min_vel_y must be <= 0 so zero commands remain possible";
@@ -1070,7 +1075,13 @@ double NeoLocalPlanner::footprintCost(const tf2::Transform & pose) const
   for (const auto & cell : cells) {
     cost = std::max(cost, costmap_->getCost(cell.x, cell.y));
   }
-  return cost / 255.0;
+  // Inflation encodes clearance for the robot CENTER, not occupied geometry
+  // at every point under its polygon. Applying it to the entire footprint
+  // inflates the robot twice and can block collision-free narrow passages.
+  if (cost >= nav2_costmap_2d::LETHAL_OBSTACLE) {
+    return 1.0;  // Also rejects unknown cells anywhere inside the footprint.
+  }
+  return get_cost(costmap_, pose.getOrigin());
 }
 
 void NeoLocalPlanner::checkTrajectory(

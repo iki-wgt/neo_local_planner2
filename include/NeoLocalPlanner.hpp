@@ -198,6 +198,7 @@ private:
   double speed_limit_ = 0.0;
   bool speed_limit_percentage_ = false;
   double max_control_dt = 0.5;
+  double clock_wait_timeout = 0.05;
   rclcpp::Time m_first_goal_reached_time;
 
   bool m_is_goal_reached = false;
