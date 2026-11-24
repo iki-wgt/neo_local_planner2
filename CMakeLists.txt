@@ -12,7 +12,8 @@ find_package(tf2_ros REQUIRED)
 find_package(tf2_sensor_msgs REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include_directories(
   include
@@ -60,5 +61,7 @@ ament_export_libraries(${library_name})
 ament_export_dependencies(${dependencies})
 
 pluginlib_export_plugin_description_file(nav2_core neo_local_planner2_plugin.xml)
+
+install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 
 ament_package()
