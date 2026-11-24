@@ -45,9 +45,3 @@
       min_stop_dist: 0.2
       differential_drive: false
       allow_reversing: false
-      # Additional safety settings; the tuning above matches the supplied configuration.
-      emergency_acc_lim_x: 0.5
-      trans_stopped_vel: 0.05
-      rot_stopped_vel: 0.05
-      max_control_dt: 0.5
-      clock_wait_timeout: 0.05

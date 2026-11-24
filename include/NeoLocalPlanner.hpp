@@ -40,7 +40,6 @@
 #include <memory>
 #include <algorithm>
 #include <mutex>
-#include <map>
 
 #include <nav_msgs/msg/path.hpp>
 #include <nav_msgs/msg/odometry.hpp>
@@ -64,12 +63,12 @@ class NeoLocalPlanner : public nav2_core::Controller
 {
 public:
   /**
-   * @brief Constructor for NeoLocalPlanner
+   * @brief Constructor for nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController
    */
   NeoLocalPlanner() = default;
 
   /**
-   * @brief Destructor for NeoLocalPlanner
+   * @brief Destrructor for nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController
    */
   ~NeoLocalPlanner() override = default;
 
@@ -141,32 +140,16 @@ public:
 
   void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg);
 
-  void reset() override;
+  bool reset_lastvel(nav_msgs::msg::Path m_global_plan, nav_msgs::msg::Path plan);
 
 private:
-  struct NumericParameter
-  {
-    const char * name;
-    double NeoLocalPlanner::* member;
-    double default_value;
-  };
-
-  static const std::vector<NumericParameter> & numericParameters();
-  static std::string validateParameters(const std::map<std::string, double> & values);
-  void applyParameters(const std::vector<rclcpp::Parameter> & parameters);
-  void resetState();  // Caller holds m_mutex.
-  tf2::Transform lookupTransform(const std::string & target, const std::string & source) const;
-  double footprintCost(const tf2::Transform & pose) const;
-  void checkTrajectory(
-    const tf2::Transform & pose, const geometry_msgs::msg::Twist & velocity,
-    double reaction_time) const;
-  double translationLimit() const;
-
   std::shared_ptr<tf2_ros::Buffer> tf_;
   std::string plugin_name_;
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros_;
   nav2_costmap_2d::Costmap2D * costmap_;
   rclcpp::Logger logger_ {rclcpp::get_logger("NeoLocalPlanner")};
+  tf2_ros::Buffer * m_tf = 0;
+  nav2_costmap_2d::Costmap2DROS * m_cost_map;
   nav_msgs::msg::Path m_global_plan;
   rclcpp::Clock::SharedPtr clock_;
 
@@ -176,9 +159,9 @@ private:
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr m_odom_sub;
   rclcpp_lifecycle::LifecycleNode::WeakPtr node_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr dyn_params_handler_;
-  rclcpp::node_interfaces::PostSetParametersCallbackHandle::SharedPtr post_params_handler_;
   std::shared_ptr<rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::Path>> m_local_plan_pub;
 
+  std::string m_global_frame = "map";
   std::string m_local_frame;
   std::string m_base_frame;
 
@@ -194,11 +177,7 @@ private:
 
   state_t m_state = state_t::STATE_IDLE;
 
-  rclcpp::Time m_last_time{0, 0, RCL_ROS_TIME};
-  double speed_limit_ = 0.0;
-  bool speed_limit_percentage_ = false;
-  double max_control_dt = 0.5;
-  double clock_wait_timeout = 0.05;
+  rclcpp::Time m_last_time;
   rclcpp::Time m_first_goal_reached_time;
 
   bool m_is_goal_reached = false;
@@ -210,14 +189,20 @@ protected:
   double acc_lim_x = 0;
   double acc_lim_y = 0;
   double acc_lim_theta = 0;
+  double acc_lim_trans = 0;
   double min_vel_x = 0;
   double max_vel_x = 0;
   double min_vel_y = 0;
   double max_vel_y = 0;
+  double min_rot_vel = 0;
+  double max_rot_vel = 0;
+  double min_trans_vel = 0;
+  double max_trans_vel = 0;
   double min_vel_theta = 0;
   double max_vel_theta = 0;
   double min_vel_trans = 0;
   double max_vel_trans = 0;
+  double rot_stopped_vel = 0;
   double theta_stopped_vel = 0;
   double trans_stopped_vel = 0;
   double yaw_goal_tolerance = 0;
@@ -245,6 +230,7 @@ protected:
   double max_backup_dist = 0.0;
   double min_stop_dist = 0.0;
   double emergency_acc_lim_x = 0.0;
+  bool m_reset_lastvel = false;
   bool m_allow_reversing = false;
   double m_robot_direction = 1.0;
   std::string odom_topic = "odom";

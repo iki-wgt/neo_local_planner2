@@ -345,3 +345,25 @@ supersedes earlier clearance measurements and is not a hardware stopping-margin
 claim. `colcon build` and the subsequent `colcon test` completed successfully;
 there are no registered package tests after the requested test-file removal.
 README remains unchanged. No commit was created.
+
+## 2026-11-24 — Reduced to minimal upstream Jazzy fix
+
+Supersedes the broad implementation described above. Restored upstream Jazzy
+commit `0ad9a086f4e6811debda1b245850aae32639e85f` for implementation, header and
+CMake. Only the implementation now differs: use configured TF frame names
+literally, throw ControllerTFError after clearing command/filter history when a
+required lookup fails, and reject nonfinite commands/history before filtering,
+after filtering and before returning. Existing control, obstacle, timing,
+parameter and reverse algorithms are retained. User-supplied tuning is preserved;
+additional settings introduced by the broad patch were removed. README unchanged.
+Previous broad-patch test results do not validate this reduced implementation.
+
+Validation of the reduced patch: build and subsequent colcon test passed (no
+registered package tests). Three isolated Nav2 integration checks passed:
+normal XY goal convergence with upstream per-axis limits; missing required map
+TF aborts with code 102 and zero commands; injected NaN position gain aborts
+with code 104 and zero commands. An earlier harness run asserted the removed
+combined-XY speed-cap feature; that assertion was replaced with the upstream
+per-axis contract in the external harness. All spawned validation servers were
+shut down. No physical test or commit performed. Header, CMake and README were
+verified byte-identical to the pinned upstream commit.
